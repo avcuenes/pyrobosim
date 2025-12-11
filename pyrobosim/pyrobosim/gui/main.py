@@ -50,6 +50,8 @@ class PyRoboSimMainWindow(QtWidgets.QMainWindow):  # type: ignore [misc]
 
     update_buttons_signal = Signal()
     """Signal for updating UI button state."""
+    toggle_buttons_signal = Signal(bool)
+    """Signal to enable/disable buttons from worker threads."""
 
     def __init__(
         self, world: World, show: bool = True, *args: Any, **kwargs: Any
@@ -75,6 +77,9 @@ class PyRoboSimMainWindow(QtWidgets.QMainWindow):  # type: ignore [misc]
         self.canvas.show()
         self.on_robot_changed()
         self.world.logger.info(f"Initialized PyRoboSim GUI.")
+
+        # Thread-safe connections.
+        self.toggle_buttons_signal.connect(self.set_buttons_during_action)
 
     def set_world(self, world: World) -> None:
         """
@@ -467,11 +472,13 @@ class PyRoboSimMainWindow(QtWidgets.QMainWindow):  # type: ignore [misc]
             robot.policy.set_user_directive(directive)
 
         self.set_buttons_during_action(False)
-        try:
-            robot.execute_policy_step()
-        finally:
-            self.set_buttons_during_action(True)
-            self.update_buttons_signal.emit()
+        self.canvas.run_policy_step(robot, self._on_llm_policy_finished)
+
+    def _on_llm_policy_finished(self, *_: Any) -> None:
+        """Re-enable UI controls after a background LLM policy run."""
+        self.set_buttons_during_action(True)
+        self.update_buttons_signal.emit()
+        self.canvas.draw_signal.emit()
 
     def on_toggle_collision_polygons(self, state: int) -> None:
         """

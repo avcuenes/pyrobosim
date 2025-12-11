@@ -232,6 +232,7 @@ class Robot(Entity):
         :param delay: Delay between actions when executing the returned plan.
         :return: Tuple of execution result and number of completed actions.
         """
+        clear_feedback = getattr(self.policy, "clear_observation_feedback", None)
         if self.policy is None:
             message = "Robot policy is not set."
             self.logger.warning(message)
@@ -265,7 +266,70 @@ class Robot(Entity):
                 0,
             )
 
-        return self.execute_plan(plan, delay=delay)
+        try:
+            result, num_completed = self.execute_plan(plan, delay=delay)
+            if result.is_success() or not hasattr(self.policy, "set_observation_feedback"):
+                return result, num_completed
+
+            observation, note = self._build_policy_feedback(result)
+            try:
+                self.policy.set_observation_feedback(observation, note)
+            except Exception as exc:
+                message = f"Failed to pass feedback to policy: {exc}"
+                self.logger.error(message)
+                return (
+                    ExecutionResult(
+                        status=ExecutionStatus.INVALID_ACTION, message=message
+                    ),
+                    num_completed,
+                )
+
+            self.logger.info("Replanning after failure with feedback: %s", note or observation)
+            try:
+                retry_plan = self.policy.propose_plan(self.world, self)
+            except Exception as exc:
+                message = f"Policy failed to replan after feedback: {exc}"
+                self.logger.error(message)
+                return (
+                    ExecutionResult(
+                        status=ExecutionStatus.INVALID_ACTION, message=message
+                    ),
+                    num_completed,
+                )
+            if retry_plan is None or retry_plan.size() == 0:
+                message = "Policy did not provide any actions on retry."
+                self.logger.info(message)
+                return (
+                    ExecutionResult(
+                        status=ExecutionStatus.INVALID_ACTION, message=message
+                    ),
+                    num_completed,
+                )
+
+            retry_result, retry_completed = self.execute_plan(
+                retry_plan, delay=delay
+            )
+            num_completed += retry_completed
+            return retry_result, num_completed
+        finally:
+            if callable(clear_feedback):
+                clear_feedback()
+
+    def _build_policy_feedback(
+        self, result: ExecutionResult
+    ) -> tuple[dict[str, str], str]:
+        """Derive structured feedback for the policy from an execution failure."""
+        message = (result.message or "").lower()
+        observation_payload = {
+            "observation": result.message or result.status.name.lower()
+        }
+        note = "Previous attempt failed. Replan from the current state."
+        if (result.status == ExecutionStatus.PRECONDITION_FAILURE) and (
+            "no object" in message or "failed to detect" in message
+        ):
+            observation_payload = {"observation": "object not found"}
+            note = "The object is not in the expected location. Replan."
+        return observation_payload, note
 
     def set_sensors(self, sensors: dict[str, Sensor] | None) -> None:
         """
@@ -1178,37 +1242,47 @@ class Robot(Entity):
         self.current_plan = plan
 
         self.logger.info("Executing task plan...")
-        if (self.world is not None) and (self.world.gui is not None):
-            self.world.gui.set_buttons_during_action(False)
+        toggler = (
+            self.world.gui.toggle_buttons_signal
+            if (self.world is not None)
+            and (self.world.gui is not None)
+            else None
+        )
+        if toggler is not None:
+            toggler.emit(False)
 
-        result = ExecutionResult(status=ExecutionStatus.SUCCESS)
-        num_completed = 0
-        num_acts = len(plan.actions)
-        for n, act_msg in enumerate(plan.actions):
-            if self.canceling_execution:
-                self.canceling_execution = False
-                message = "Canceled plan execution."
-                self.logger.info(message)
-                result = ExecutionResult(
-                    status=ExecutionStatus.CANCELED, message=message
-                )
-                break
+        try:
+            result = ExecutionResult(status=ExecutionStatus.SUCCESS)
+            num_completed = 0
+            num_acts = len(plan.actions)
+            for n, act_msg in enumerate(plan.actions):
+                if self.canceling_execution:
+                    self.canceling_execution = False
+                    message = "Canceled plan execution."
+                    self.logger.info(message)
+                    result = ExecutionResult(
+                        status=ExecutionStatus.CANCELED, message=message
+                    )
+                    break
 
-            self.logger.info(f"Executing action {act_msg.type} [{n+1}/{num_acts}]")
-            result = self.execute_action(act_msg, realtime_factor=realtime_factor)
-            if not result.is_success():
-                self.logger.info(
-                    f"Task plan failed to execute on action {n+1}/{num_acts}"
-                )
-                break
-            num_completed += 1
-            time.sleep(delay)  # Artificial delay between actions
+                self.logger.info(f"Executing action {act_msg.type} [{n+1}/{num_acts}]")
+                result = self.execute_action(act_msg, realtime_factor=realtime_factor)
+                if not result.is_success():
+                    self.logger.info(
+                        f"Task plan failed to execute on action {n+1}/{num_acts}"
+                    )
+                    break
+                num_completed += 1
+                time.sleep(delay)  # Artificial delay between actions
 
-        self.logger.info(f"Task plan completed with status: {result.status.name}")
-        self.canceling_execution = False
-        self.executing_plan = False
-        self.current_plan = None
-        return result, num_completed
+            self.logger.info(f"Task plan completed with status: {result.status.name}")
+            return result, num_completed
+        finally:
+            self.canceling_execution = False
+            self.executing_plan = False
+            self.current_plan = None
+            if toggler is not None:
+                toggler.emit(True)
 
     def update_polygons(self) -> None:
         """

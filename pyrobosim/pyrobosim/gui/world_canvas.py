@@ -1,6 +1,7 @@
 """Utilities for displaying a PyRoboSim world in a figure canvas."""
 
 import threading
+from typing import Any
 
 import adjustText
 import numpy as np
@@ -22,6 +23,7 @@ from .action_runners import (
     DetectRunner,
     OpenRunner,
     CloseRunner,
+    PolicyStepRunner,
 )
 from .main import PyRoboSimMainWindow
 from .options import WorldCanvasOptions
@@ -661,3 +663,15 @@ class WorldCanvas(FigureCanvasQTAgg):  # type: ignore [misc]
         """
         close_thread = CloseRunner(self.world, robot)
         self.thread_pool.start(close_thread)
+
+    def run_policy_step(self, robot: Robot, on_finished: Any | None = None) -> None:
+        """
+        Executes an LLM policy step in a background thread.
+
+        :param robot: Robot instance to execute the policy for.
+        :param on_finished: Optional callback taking (result, num_actions) when done.
+        """
+        policy_thread = PolicyStepRunner(robot)
+        if on_finished is not None:
+            policy_thread.signals.finished.connect(on_finished)
+        self.thread_pool.start(policy_thread)

@@ -175,10 +175,29 @@ class LLMPolicy(RobotPolicy):
     temperature: float = 0.1
     stop_sequences: Iterable[str] | None = ("###",)
     user_directive: str | None = None
+    observation_feedback: dict[str, Any] | None = None
+    observation_note: str | None = None
 
     def set_user_directive(self, directive: str | None) -> None:
         """Update the free-form user directive included in the prompt."""
         self.user_directive = directive.strip() if directive else None
+
+    def set_observation_feedback(
+        self, feedback: dict[str, Any] | None, note: str | None = None
+    ) -> None:
+        """
+        Attach observation feedback from the last execution attempt for the next prompt.
+
+        :param feedback: Optional structured feedback to surface to the LLM.
+        :param note: Optional human-readable note to append after the feedback.
+        """
+        self.observation_feedback = feedback
+        self.observation_note = note
+
+    def clear_observation_feedback(self) -> None:
+        """Clear any cached observation feedback before the next prompt."""
+        self.observation_feedback = None
+        self.observation_note = None
 
     def propose_plan(self, world: "World", robot: "Robot") -> TaskPlan | None:
         if robot.world is None:
@@ -191,6 +210,12 @@ class LLMPolicy(RobotPolicy):
         )
         if self.user_directive:
             prompt += f"\n\nUser request:\n{self.user_directive}\n"
+        if self.observation_feedback is not None:
+            prompt += "\nObservation feedback:\n"
+            prompt += json.dumps(self.observation_feedback)
+            if self.observation_note:
+                prompt += f"\n{self.observation_note.strip()}"
+            prompt += "\n"
 
         output = self.generator.generate(
             prompt,

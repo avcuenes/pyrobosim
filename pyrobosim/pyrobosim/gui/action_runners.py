@@ -1,6 +1,6 @@
 """Utilities for executing actions from the UI in separate QThreads."""
 
-from PySide6.QtCore import QRunnable
+from PySide6.QtCore import QObject, QRunnable, Signal
 
 from ..core.robot import Robot
 from ..core.world import World
@@ -222,3 +222,24 @@ class CloseRunner(QRunnable):  # type: ignore[misc]
             return
 
         robot.close_location()
+
+
+class PolicyStepRunnerSignals(QObject):
+    """Signals for reporting policy step completion."""
+
+    finished = Signal(object, int)
+    """Emitted after executing a policy step with result and number of actions."""
+
+
+class PolicyStepRunner(QRunnable):  # type: ignore[misc]
+    """Runs a full policy step in a background thread to keep the GUI responsive."""
+
+    def __init__(self, robot: Robot) -> None:
+        super(PolicyStepRunner, self).__init__()
+        self.robot = robot
+        self.signals = PolicyStepRunnerSignals()
+
+    def run(self) -> None:
+        """Execute the policy step and emit the result."""
+        result, num_actions = self.robot.execute_policy_step()
+        self.signals.finished.emit(result, num_actions)
